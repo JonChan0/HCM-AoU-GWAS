@@ -1,0 +1,123 @@
+---
+title: "3_locuszoom_plotter"
+author: "Jonathan Chan"
+date: "2025-11-16"
+output: html_document
+---
+
+## Setup
+```{r}
+library(tidyverse)
+library(locuszoomr)
+library(AnnotationHub)
+library(patchwork)
+```
+
+```{r}
+#Setup the Ensembl database for v95 to provide gene tracks
+ah <- AnnotationHub()
+ens_v <- query(ah, c("EnsDb", "Homo sapiens"))
+ensDb_v95 <- ah[["AH67950"]]
+rm(ens_v)
+```
+
+```{r}
+#Setup LDlink API
+token <- readRDS('2_scripts/6_PostGWAS_Processing/aux_scripts/ldlinkR_API_token.rds')
+```
+
+```{r}
+stacked_lz_plot <- function(
+  sumstats,
+  peak_row_indices,
+  output_name,
+  output_folder
+) {
+    #Limit to 10 plots
+    if (length(peak_row_indices) >= 10){
+        peak_row_indices <- peak_row_indices[1:10]
+    }
+
+    index_snps <- dplyr::slice(sumstats, peak_row_indices)$rsid
+
+    locus_plots <- vector('list',length(index_snps))
+
+    for (i in seq_along(index_snps)){
+        loc <- locus(
+            data = sumstats,
+            flank = 1e5,
+            chrom = 'chromosome',
+            pos = 'position',
+            p = 'pval',
+            labs = 'rsid',
+            index_snp = index_snps[i],
+            ens_db = ensDb_v95
+        )
+        
+        loc <- tryCatch(
+            link_LD(loc, token = token), error = function(e){
+            warning(sprintf("LDLinkR failed for index_snp '%s': %s",
+                        index_snps[i], e$message))
+            return(loc)
+        }
+    )
+
+        loc <- link_recomb(loc)
+
+        locus_plots[[i]] <- locus_ggplot(loc, recomb_col='red', labels=c('index'))
+        print(locus_plots[[i]])
+    }
+  output_name <- str_c(output_name,'_gwas_peaks_lz')
+  stacked_plot <- wrap_plots(locus_plots,  nrow=1)
+#   print(stacked_plot)
+  ggsave(str_glue('{output_folder}{output_name}.png'), dpi=600, height=9, width=5*length(locus_plots), limitsize=F)
+
+  return(locus_plots)
+}
+```
+
+## Array LocusZoom for Top GWAS Loci
+```{r}
+array_sumstats <- read_tsv('3_output/4_REGENIE/2_step2/array/formatted/hcm_step2_hcm_rsID.tsv')
+
+#Convert 'pval' column to log_pval (which it is in REGENIE)
+array_sumstats <- array_sumstats %>%
+    mutate(pval = 10^-(pval))
+```
+
+```{r}
+#Use the quick_peak() function from locuszoomr
+array_gwas_peaks <- quick_peak(as.data.frame(array_sumstats), p_cutoff=1e-5, chrom='chromosome',pos='position',p='pval')
+
+#Plot the locuszoom plots
+array_gwas_stacked_lzplot <- stacked_lz_plot(array_sumstats, array_gwas_peaks,'array','3_output/5_GWAS_Manhattan_QQ/array/hcm/')
+```
+
+## srWGS ACAF LocusZoom for Top GWAS Loci
+```{r}
+srwgs_sumstats <- read_tsv('3_output/4_REGENIE/2_step2/srWGS_ACAF/formatted/hcm_manhattan_rsid.tsv')
+srwgs_sumstats <- srwgs_sumstats %>%
+    filter(!is.na(pval))
+srwgs_sumstats <- srwgs_sumstats %>% #Convert 'pval' column to log_pval (which it is in REGENIE)
+    mutate(pval = 10^-(pval))
+```
+
+```{r}
+srwgs_gwas_peaks <- quick_peak(as.data.frame(srwgs_sumstats), p_cutoff=1e-5, chrom='chromosome',pos='position',p='pval', min_points=6)
+
+#Plot the locuszoom plots
+srwgs_gwas_stacked_lzplot <- stacked_lz_plot(srwgs_sumstats, srwgs_gwas_peaks,'srwgs','3_output/5_GWAS_Manhattan_QQ/srWGS_ACAF/hcm/')
+```
+
+Repeat only for srWGS ACAF after filtering to >= 1% MAF.
+
+```{r}
+srwgs_sumstats_1maf <- read_tsv('3_output/4_REGENIE/2_step2/srWGS_ACAF/formatted/hcm_manhattan_rsid_maf1filtered.tsv')
+srwgs_sumstats_1maf <- srwgs_sumstats_1maf %>%
+    filter(!is.na(pval))%>% #Convert 'pval' column to log_pval (which it is in REGENIE)
+    mutate(pval = 10^-(pval))
+srwgs_gwas_1maf_peaks <- quick_peak(as.data.frame(srwgs_sumstats_1maf), p_cutoff=1e-5, chrom='chromosome',pos='position',p='pval', min_points=6)
+
+#Plot the locuszoom plots
+srwgs_gwas_stacked_1maf_lzplot <- stacked_lz_plot(srwgs_sumstats_1maf, srwgs_gwas_1maf_peaks,'srwgs_1maf','../../../../../3_output/5_GWAS_Manhattan_QQ/srWGS_ACAF/hcm/')
+```
